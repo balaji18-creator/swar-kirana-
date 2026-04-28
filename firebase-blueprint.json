@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Inventory item in the shop",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Unique name of the product" },
+        "stock": { "type": "number", "description": "Current quantity in stock" },
+        "unit": { "type": "string", "description": "Unit of measurement (e.g., kg, unit, pack)" },
+        "price": { "type": "number", "description": "Selling price per unit" },
+        "minStock": { "type": "number", "description": "Threshold for low stock alerts" }
+      },
+      "required": ["name", "stock", "unit", "price"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Store customer for khata/credit management",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Customer name" },
+        "balance": { "type": "number", "description": "Total credit balance (positive means they owe money)" }
+      },
+      "required": ["name", "balance"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Sale, stock addition, or credit payment",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["SALE", "ADD_STOCK", "CREDIT", "PAYMENT"], "description": "Type of transaction" },
+        "item": { "type": "string", "description": "Item involved (for sales/stock)" },
+        "amount": { "type": "number", "description": "Monetary value or quantity involved" },
+        "customer": { "type": "string", "description": "Customer involved (for khata)" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "transcript": { "type": "string", "description": "Original voice command" },
+        "reply": { "type": "string", "description": "AI generated spoken response" }
+      },
+      "required": ["type", "amount", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Collection of inventory items"
+    },
+    "/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "Collection of customer khata entries"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "History of all shop actions"
+    }
+  }
+}

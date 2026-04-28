@@ -1,0 +1,14 @@
+{
+  "name": "Swar Kirana – Voice OS",
+  "description": "A voice-first management system for small convenience stores to manage inventory, sales, and khata using Hindi, Telugu, or English voice commands.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "voice_control",
+    "inventory_management",
+    "billing",
+    "ledger"
+  ]
+}
+  
