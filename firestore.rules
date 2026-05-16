@@ -1,33 +1,60 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny
+
+    // ── Deny everything by default ─────────────────────────────────────────
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helper functions
+    // ── Helper functions ──────────────────────────────────────────────────
     function isSignedIn() {
       return request.auth != null;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isOwner() {
+      // In a multi-user setup: check request.auth.uid against an owners collection
+      // For now: any signed-in user is treated as the shop owner
+      return isSignedIn();
     }
 
+    function isValidString(val) {
+      return val is string && val.size() > 0 && val.size() <= 256;
+    }
+
+    function isPositiveNumber(val) {
+      return val is number && val >= 0;
+    }
+
+    // ── Products ─────────────────────────────────────────────────────────
     match /products/{productId} {
-      allow read: if true; // Allow public read for inventory demo, or isSignedIn()
-      allow write: if isSignedIn();
+      allow read: if isOwner();
+      allow create: if isOwner()
+        && isValidString(request.resource.data.name)
+        && isPositiveNumber(request.resource.data.stock)
+        && isPositiveNumber(request.resource.data.price)
+        && isPositiveNumber(request.resource.data.minStock);
+      allow update: if isOwner()
+        && isPositiveNumber(request.resource.data.stock);
+      allow delete: if isOwner();
     }
 
+    // ── Customers ────────────────────────────────────────────────────────
     match /customers/{customerId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow read:   if isOwner();
+      allow create: if isOwner()
+        && isValidString(request.resource.data.name);
+      allow update: if isOwner();
+      allow delete: if isOwner();
     }
 
+    // ── Transactions (append-only) ───────────────────────────────────────
     match /transactions/{transactionId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn();
+      allow read:   if isOwner();
+      // No update/delete — transactions are immutable audit log
+      allow create: if isOwner()
+        && isValidString(request.resource.data.type)
+        && isValidString(request.resource.data.timestamp);
     }
   }
 }

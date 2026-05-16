@@ -1,73 +1,83 @@
+import { GoogleGenAI, Type } from '@google/genai';
+import { Intent, Language, ParsedCommand } from '../types';
 
-import { GoogleGenAI, Type } from "@google/genai";
+const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY as string });
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
+const FALLBACK_REPLIES: Record<Language, string> = {
+  'hi-IN': 'Maaf kijiye, samajh nahi aaya. Dobara boliye.',
+  'te-IN': 'Maafi cheppandi, artham kaaledu. Malli cheppandi.',
+  'en-IN': 'Sorry, I did not understand. Please try again.',
+};
 
-export async function parseCommand(text: string, language: string) {
+export async function parseCommand(text: string, language: Language): Promise<ParsedCommand> {
   const prompt = `
-    You are an expert command parser for a Kirana Store (Convenience Shop). 
-    Convert the following voice command (which could be in Hindi, Telugu, or English) into a structured JSON object.
+You are an expert AI command parser for a Kirana (Indian grocery) store.
+Convert the voice command into structured JSON. The command may be in Hindi, Telugu, or English (or a mix).
 
-    Command: "${text}"
-    Language: "${language}"
+Command: "${text}"
+Speaker language: "${language}"
 
-    Rules for Intents:
-    - ADD_STOCK: When shop owner says they received or added stock (e.g. "Atta aaya 20kg", "Added 5 milk packs")
-    - SALE: When owner sells something (e.g. "Ram ko 2kg atta becho", "Sold 1 bread")
-    - CREDIT: When something is sold on credit/udhar (e.g. "Mohan ko 500 udhar", "Bill 200 on Ram's account")
-    - PAYMENT: When a customer pays back credit (e.g. "Sita ne 200 diya", "Received 500 payment from Ram")
-    - QUERY_STOCK: Asking about stock (e.g. "Atta kitna hai?", "Check milk stock")
-    - QUERY_SALE: Asking about today's sales (e.g. "Aaj ki sale kitni hai?", "Show today's total")
+=== INTENT RULES ===
+- ADD_STOCK   : owner received new stock       ("Atta aaya 20 kilo", "Got 5 milk packs")
+- SALE        : owner sold something           ("Ram ko 2kg atta becho", "Sold 1 bread")
+- CREDIT      : sold on credit / udhar         ("Mohan ko 500 ka udhar", "Bill 200 on Ram's khata")
+- PAYMENT     : customer paid back             ("Sita ne 200 diye", "Ram paid 500")
+- QUERY_STOCK : asking about stock level       ("Atta kitna hai?", "Stock check karo")
+- QUERY_SALE  : asking about today's sales     ("Aaj ki sale?", "Total kitni hui?")
 
-    Entity Mapping:
-    - item: The product name (e.g. "Atta", "Milk")
-    - quantity: Numeric value for stock/sale (e.g. 20, 2)
-    - amount: Numeric value for money/khata (e.g. 500, 200)
-    - customer: Name of the person (e.g. "Ram", "Mohan")
+=== ENTITY RULES ===
+- item      : product name, Title Case (e.g. "Atta", "Milk", "Rice")
+- quantity  : numeric quantity (e.g. 20 for "20 kilo")
+- amount    : monetary amount in ₹ (e.g. 500)
+- customer  : person's name, Title Case (e.g. "Ram", "Mohan")
 
-    Also generate a 'reply' - a natural, friendly confirmation in the same language as the command.
+=== REPLY RULES ===
+Generate a short, warm, friendly confirmation IN THE SAME LANGUAGE as the command.
+For Hindi: use casual Hinglish (e.g. "20 kg Atta stock mein add ho gaya! ✓")
+For Telugu: use casual Telugu (e.g. "20 kg Atta stock lo add chesham! ✓")
+For English: use simple English (e.g. "Added 20kg Atta to stock! ✓")
 
-    Output format MUST be JSON:
-    {
-      "intent": "INTENT_NAME",
-      "params": { "item": "...", "quantity": 0, "amount": 0, "customer": "..." },
-      "reply": "..."
-    }
-  `;
+Return ONLY valid JSON, no explanation.
+`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: 'gemini-2.0-flash',
       contents: prompt,
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            intent: { type: Type.STRING },
+            intent:  { type: Type.STRING },
             params: {
               type: Type.OBJECT,
               properties: {
-                item: { type: Type.STRING },
+                item:     { type: Type.STRING },
                 quantity: { type: Type.NUMBER },
-                amount: { type: Type.NUMBER },
+                amount:   { type: Type.NUMBER },
                 customer: { type: Type.STRING },
-              }
+              },
             },
-            reply: { type: Type.STRING }
+            reply: { type: Type.STRING },
           },
-          required: ["intent", "params", "reply"]
-        }
-      }
+          required: ['intent', 'params', 'reply'],
+        },
+      },
     });
 
-    return JSON.parse(response.text || '{}');
+    const parsed = JSON.parse(response.text || '{}');
+    return {
+      intent: parsed.intent as Intent ?? Intent.UNKNOWN,
+      params:  parsed.params  ?? {},
+      reply:   parsed.reply   ?? FALLBACK_REPLIES[language],
+    };
   } catch (error) {
-    console.error("Gemini Parsing Error:", error);
-    return { 
-      intent: 'UNKNOWN', 
-      params: {}, 
-      reply: language === 'hi-IN' ? 'Maaf kijiye, samajh nahi aaya.' : 'Sorry, I did not understand.' 
+    console.error('Gemini parse error:', error);
+    return {
+      intent: Intent.UNKNOWN,
+      params: {},
+      reply:  FALLBACK_REPLIES[language],
     };
   }
 }
