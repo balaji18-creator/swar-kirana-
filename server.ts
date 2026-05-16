@@ -4,24 +4,24 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { initializeApp, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
-import firebaseConfig from './firebase-applet-config.json' assert { type: 'json' };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Firebase Admin
+// ── Firebase Init from environment variables ──────────────────────────────
 if (!getApps().length) {
   initializeApp({
-    projectId: firebaseConfig.projectId,
+    projectId: process.env.FIREBASE_PROJECT_ID,
   });
 }
 
-console.log('Target Project ID:', firebaseConfig.projectId);
-console.log('Target Database ID:', firebaseConfig.firestoreDatabaseId);
+const databaseId = process.env.FIREBASE_DATABASE_ID || '(default)';
+console.log('Target Project ID:', process.env.FIREBASE_PROJECT_ID);
+console.log('Target Database ID:', databaseId);
 
-let db = getFirestore(firebaseConfig.firestoreDatabaseId);
+let db = getFirestore(databaseId);
 
-// Seed Data with retry
+// ── Seed Data ──────────────────────────────────────────────────────────────
 async function seedData(retries = 5, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -36,29 +36,26 @@ async function seedData(retries = 5, delay = 2000) {
           { name: 'Milk', stock: 5, unit: 'packet', price: 30, minStock: 10 },
           { name: 'Sugar', stock: 25, unit: 'kg', price: 40, minStock: 5 },
           { name: 'Rice', stock: 100, unit: 'kg', price: 60, minStock: 20 },
+          { name: 'Oil', stock: 15, unit: 'litre', price: 120, minStock: 5 },
+          { name: 'Dal', stock: 30, unit: 'kg', price: 90, minStock: 8 },
         ];
-
         for (const p of initialProducts) {
           await productsRef.add(p);
         }
-
-        // Seed some customers
+        // Seed customers
         await db.collection('customers').doc('ram').set({ name: 'Ram', balance: 500 });
         await db.collection('customers').doc('mohan').set({ name: 'Mohan', balance: 0 });
         console.log('Seeding completed.');
       } else {
         console.log('Firestore connected and data exists.');
       }
-      return; // Success
+      return;
     } catch (err: any) {
-      console.error(`Firestore connection attempt ${i + 1} failed:`, err.message);
-      
-      // If we got permission denied on the named database, try the default one
+      console.error(`Firestore attempt ${i + 1} failed:`, err.message);
       if (err.message.includes('PERMISSION_DENIED') && i === 0) {
-        console.log('Named database failed. Switching to default database for next attempts.');
-        db = getFirestore(); // Fallback to default
+        console.log('Named DB failed. Falling back to default database.');
+        db = getFirestore();
       }
-      
       if (i === retries - 1) throw err;
       console.log(`Retrying in ${delay}ms...`);
       await new Promise(res => setTimeout(res, delay));
@@ -66,19 +63,20 @@ async function seedData(retries = 5, delay = 2000) {
   }
 }
 
+// ── Server ──────────────────────────────────────────────────────────────────
 async function startServer() {
   try {
     await seedData();
   } catch (err: any) {
-    console.error('Initial seedData failed, but starting server anyway:', err.message);
+    console.error('seedData failed, starting server anyway:', err.message);
   }
 
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json());
 
-  // Execute parsed intent
+  // ── POST /api/execute-intent ─────────────────────────────────────────────
   app.post('/api/execute-intent', async (req, res) => {
     try {
       const { intent, params, transcript, reply, language } = req.body as {
@@ -90,86 +88,154 @@ async function startServer() {
       };
 
       const timestamp = new Date().toISOString();
-      let actionResult: { success: boolean; message: string; reply: string; intent: string } = {
+      let actionResult: { success: boolean; message: string; reply: string; intent: string; data?: any } = {
         success: true,
         message: '',
         reply: reply || '',
-        intent: intent || 'UNKNOWN'
+        intent: intent || 'UNKNOWN',
       };
 
+      // ── ADD_STOCK ──────────────────────────────────────────────────────────
       if (intent === 'ADD_STOCK') {
         const { item, quantity } = params;
-        const productsRef = db.collection('products');
-        const query = await productsRef.where('name', '==', item).limit(1).get();
-
-        if (!query.empty) {
-          const doc = query.docs[0];
-          await doc.ref.update({
-            stock: FieldValue.increment(quantity),
-          });
-          actionResult.message = `Added ${quantity} ${doc.data().unit} to ${item}`;
+        const q = await db.collection('products').where('name', '==', item).limit(1).get();
+        if (!q.empty) {
+          const doc = q.docs[0];
+          await doc.ref.update({ stock: FieldValue.increment(quantity) });
+          actionResult.message = `Added ${quantity} ${doc.data().unit} of ${item}`;
         } else {
           actionResult.success = false;
-          actionResult.message = `Product ${item} not found in inventory.`;
+          actionResult.message = `Product "${item}" not found in inventory.`;
         }
+
+      // ── SALE ──────────────────────────────────────────────────────────────
       } else if (intent === 'SALE') {
         const { item, quantity } = params;
-        const productsRef = db.collection('products');
-        const query = await productsRef.where('name', '==', item).limit(1).get();
-
-        if (!query.empty) {
-          const doc = query.docs[0];
+        const q = await db.collection('products').where('name', '==', item).limit(1).get();
+        if (!q.empty) {
+          const doc = q.docs[0];
           const currentStock = doc.data().stock;
           if (currentStock >= quantity) {
-            await doc.ref.update({
-              stock: FieldValue.increment(-quantity),
-            });
-            actionResult.message = `Sold ${quantity} ${doc.data().unit} of ${item}`;
+            await doc.ref.update({ stock: FieldValue.increment(-quantity) });
+            const revenue = quantity * (doc.data().price || 0);
+            actionResult.message = `Sold ${quantity} ${doc.data().unit} of ${item}. Revenue: ₹${revenue}`;
           } else {
             actionResult.success = false;
-            actionResult.message = `Not enough stock. Only ${currentStock} left.`;
+            actionResult.message = `Not enough stock. Only ${currentStock} ${doc.data().unit} left.`;
           }
         } else {
           actionResult.success = false;
-          actionResult.message = `Product ${item} not found in inventory.`;
+          actionResult.message = `Product "${item}" not found in inventory.`;
         }
+
+      // ── CREDIT ────────────────────────────────────────────────────────────
       } else if (intent === 'CREDIT') {
         const { customer, amount } = params;
-        const customerRef = db.collection('customers').doc(customer.toLowerCase());
-        const doc = await customerRef.get();
-
+        const ref = db.collection('customers').doc(customer.toLowerCase());
+        const doc = await ref.get();
         if (doc.exists) {
-          await customerRef.update({
-            balance: FieldValue.increment(amount),
-          });
+          await ref.update({ balance: FieldValue.increment(amount) });
         } else {
-          await customerRef.set({
-            name: customer,
-            balance: amount,
-          });
+          await ref.set({ name: customer, balance: amount });
         }
-
         actionResult.message = `Added ₹${amount} credit for ${customer}`;
+
+      // ── PAYMENT ───────────────────────────────────────────────────────────
       } else if (intent === 'PAYMENT') {
         const { customer, amount } = params;
-        const customerRef = db.collection('customers').doc(customer.toLowerCase());
-        await customerRef.update({
-          balance: FieldValue.increment(-amount),
+        const ref = db.collection('customers').doc(customer.toLowerCase());
+        const doc = await ref.get();
+        if (!doc.exists) {
+          actionResult.success = false;
+          actionResult.message = `Customer "${customer}" not found.`;
+        } else {
+          await ref.update({ balance: FieldValue.increment(-amount) });
+          actionResult.message = `Recorded ₹${amount} payment from ${customer}`;
+        }
+
+      // ── QUERY_STOCK ───────────────────────────────────────────────────────
+      } else if (intent === 'QUERY_STOCK') {
+        const { item } = params || {};
+        if (item) {
+          // Query for a specific item
+          const q = await db.collection('products').where('name', '==', item).limit(1).get();
+          if (!q.empty) {
+            const data = q.docs[0].data();
+            actionResult.data = { products: [{ id: q.docs[0].id, ...data }] };
+            actionResult.message = `${item} has ${data.stock} ${data.unit} in stock.`;
+            if (!actionResult.reply) {
+              actionResult.reply = language === 'hi-IN'
+                ? `${item} mein ${data.stock} ${data.unit} bacha hai.`
+                : language === 'te-IN'
+                ? `${item} lo ${data.stock} ${data.unit} undi.`
+                : `${item} has ${data.stock} ${data.unit} remaining.`;
+            }
+          } else {
+            actionResult.success = false;
+            actionResult.message = `Product "${item}" not found.`;
+          }
+        } else {
+          // Return full inventory
+          const snap = await db.collection('products').orderBy('name').get();
+          const products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          const lowStock = products.filter((p: any) => p.stock <= p.minStock);
+          actionResult.data = { products };
+          actionResult.message = `${products.length} items in inventory. ${lowStock.length} low-stock alerts.`;
+          if (!actionResult.reply) {
+            actionResult.reply = language === 'hi-IN'
+              ? `Aapke paas ${products.length} items hain. ${lowStock.length} items kam hai.`
+              : language === 'te-IN'
+              ? `Meeru ${products.length} items unnai. ${lowStock.length} items takkuva.`
+              : `You have ${products.length} items. ${lowStock.length} running low.`;
+          }
+        }
+
+      // ── QUERY_SALE ────────────────────────────────────────────────────────
+      } else if (intent === 'QUERY_SALE') {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const snap = await db
+          .collection('transactions')
+          .where('timestamp', '>=', todayStart.toISOString())
+          .where('type', '==', 'SALE')
+          .get();
+
+        let totalRevenue = 0;
+        let totalUnits = 0;
+        const salesByItem: Record<string, number> = {};
+
+        snap.forEach(doc => {
+          const d = doc.data();
+          totalRevenue += (d.amount || 0) * (d.price || 0);
+          totalUnits += d.amount || 0;
+          if (d.item) salesByItem[d.item] = (salesByItem[d.item] || 0) + (d.amount || 0);
         });
-        actionResult.message = `Recorded ₹${amount} payment from ${customer}`;
+
+        actionResult.data = { totalRevenue, totalUnits, salesByItem, count: snap.size };
+        actionResult.message = `Today: ${snap.size} sales, ${totalUnits} units sold.`;
+        if (!actionResult.reply) {
+          actionResult.reply = language === 'hi-IN'
+            ? `Aaj ${snap.size} sales hui. ${totalUnits} units becha.`
+            : language === 'te-IN'
+            ? `Ivi ${snap.size} sales ayindi. ${totalUnits} units ammaindi.`
+            : `Today: ${snap.size} sales, ${totalUnits} units sold.`;
+        }
+
+      // ── UNKNOWN ───────────────────────────────────────────────────────────
       } else {
         actionResult.success = false;
         actionResult.message = `Unknown intent: ${intent}`;
       }
 
-      // Log Transaction
-      if (actionResult.success) {
+      // ── Log Transaction ───────────────────────────────────────────────────
+      const readOnlyIntents = ['QUERY_STOCK', 'QUERY_SALE'];
+      if (actionResult.success && !readOnlyIntents.includes(intent)) {
         try {
           await db.collection('transactions').add({
             type: intent,
-            item: params.item || null,
-            amount: params.amount || params.quantity || 0,
-            customer: params.customer || null,
+            item: params?.item || null,
+            amount: params?.amount || params?.quantity || 0,
+            customer: params?.customer || null,
             timestamp,
             transcript: transcript || null,
             reply: reply || null,
@@ -177,7 +243,7 @@ async function startServer() {
             status: 'SUCCESS',
           });
         } catch (logErr: any) {
-          console.error('Failed to log transaction, but action succeeded:', logErr.message);
+          console.error('Transaction log failed (action succeeded):', logErr.message);
         }
       }
 
@@ -188,87 +254,74 @@ async function startServer() {
     }
   });
 
+  // ── GET /api/kpis/today ──────────────────────────────────────────────────
   app.get('/api/kpis/today', async (req, res) => {
     try {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
-      const transactionsSnap = await db
-        .collection('transactions')
-        .where('timestamp', '>=', todayStart.toISOString())
-        .get();
+      const [transSnap, custSnap, prodSnap] = await Promise.all([
+        db.collection('transactions').where('timestamp', '>=', todayStart.toISOString()).get(),
+        db.collection('customers').get(),
+        db.collection('products').get(),
+      ]);
 
       let salesToday = 0;
-      transactionsSnap.forEach((doc) => {
-        const data = doc.data();
-        if (data.type === 'SALE') {
-          salesToday += data.amount || 0;
-        }
+      transSnap.forEach(doc => {
+        if (doc.data().type === 'SALE') salesToday += doc.data().amount || 0;
       });
 
-      const customersSnap = await db.collection('customers').get();
       let pendingKhata = 0;
-      customersSnap.forEach((doc) => {
-        pendingKhata += doc.data().balance || 0;
-      });
+      custSnap.forEach(doc => { pendingKhata += doc.data().balance || 0; });
 
-      const productsSnap = await db.collection('products').get();
       let itemsInStock = 0;
       let lowStockCount = 0;
-      productsSnap.forEach((doc) => {
-        const data = doc.data();
-        itemsInStock += data.stock || 0;
-        if (data.stock <= data.minStock) {
-          lowStockCount++;
-        }
+      prodSnap.forEach(doc => {
+        const d = doc.data();
+        itemsInStock += d.stock || 0;
+        if (d.stock <= d.minStock) lowStockCount++;
       });
 
-      res.json({
-        salesToday,
-        pendingKhata,
-        itemsInStock,
-        lowStockCount,
-      });
+      res.json({ salesToday, pendingKhata, itemsInStock, lowStockCount });
     } catch (error: any) {
-      console.error('Error getting KPIs:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
+  // ── GET /api/history ─────────────────────────────────────────────────────
   app.get('/api/history', async (req, res) => {
     try {
-      const snapshot = await db
-        .collection('transactions')
-        .orderBy('timestamp', 'desc')
-        .limit(20)
-        .get();
-
-      const history = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      res.json(history);
+      const limit = parseInt(req.query.limit as string || '20', 10);
+      const snap = await db.collection('transactions').orderBy('timestamp', 'desc').limit(limit).get();
+      res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     } catch (error: any) {
-      console.error('Error getting history:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
+  // ── GET /api/inventory ───────────────────────────────────────────────────
   app.get('/api/inventory', async (req, res) => {
     try {
-      const snapshot = await db.collection('products').orderBy('name').get();
-      const inventory = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      res.json(inventory);
+      const snap = await db.collection('products').orderBy('name').get();
+      res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     } catch (error: any) {
-      console.error('Error getting inventory:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  // Vite middleware for development
+  // ── GET /api/customers ───────────────────────────────────────────────────
+  app.get('/api/customers', async (req, res) => {
+    try {
+      const snap = await db.collection('customers').orderBy('name').get();
+      const customers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const totalKhata = customers.reduce((sum: number, c: any) => sum + (c.balance || 0), 0);
+      res.json({ customers, totalKhata });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Vite / Static ─────────────────────────────────────────────────────────
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -278,16 +331,15 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.get('*', (_req, _res) => _res.sendFile(path.join(distPath, 'index.html')));
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`✅ Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
+startServer().catch(err => {
   console.error('Failed to start server:', err);
+  process.exit(1);
 });
